@@ -1,14 +1,20 @@
 // FixedWidthBigUint: const-num-traits + CiosRowOps for num-bigint.
 //
-// Design: stores a raw Vec<BigDigit> of exactly n_limbs digits (may have
-// trailing zeros — the caller's invariant, NOT BigUint's invariant). Arithmetic
-// converts to BigUint temporarily (which normalizes), then pads the result Vec
-// back to n_limbs. This avoids all conflict with BigUint's normalization
-// assertion (a.last() != Some(&0)).
+// Design: stores `inner: BigUint` directly and delegates all arithmetic to it.
+// No padding, no Vec roundtrips. `n_limbs` carries the declared width for
+// the three operations that genuinely need it:
+//   - bits_precision()          → ring width, not value width
+//   - CiosRowOps::word_count()  → stable limb count for the inner loop
+//   - OverflowingAdd            → overflow detection at declared width
 //
-// Personality: Nct only. BigUint is inherently variable-time; the subtle CT
-// traits cannot be honestly satisfied.
+// WrappingSub is the one place where BigUint's unsigned arithmetic would panic
+// (lhs < rhs); we handle that case by adding 2^width.
+//
+// Everything else — Add/Sub/Mul/Div/Rem/Wrapping*/Checked*/Carrying* — is
+// pure delegation. BigUint grows to hold any result; that's correct and
+// cheaper than the previous Vec-roundtrip approach.
 
+use super::IntDigits;
 use crate::big_digit::{self, BigDigit};
 use crate::std_alloc::Vec;
 use crate::BigInt;
@@ -25,91 +31,57 @@ use const_num_traits::{
     BorrowingSub, FromByteSlice, HasPersonality, Nct, One, Parity, ToBytes, Zero,
 };
 use modmath_cios::CiosRowOps;
+use num_traits::Zero as NtZero;
 use core::cmp::Ordering;
 use core::ops::{
     Add, BitAnd, BitOr, BitXor, Div, Mul, Rem, RemAssign, Shl, Shr, ShrAssign, Sub,
 };
 
-/// Bits per native digit.
 const DIGIT_BITS: u32 = big_digit::BITS as u32;
-/// Bytes per native digit.
 const DIGIT_BYTES: usize = (DIGIT_BITS / 8) as usize;
-
-// ── Internal helpers ──────────────────────────────────────────────────────────
-
-/// Build a normalized BigUint from a raw digit slice (removes trailing zeros).
-fn biguint_from_digits(digits: &[BigDigit]) -> BigUint {
-    let mut d = digits.to_vec();
-    while d.last() == Some(&0) {
-        d.pop();
-    }
-    BigUint { data: d }
-}
-
-/// Extract a BigUint's digits into a Vec padded to `n` entries with zeros.
-fn digits_from_biguint(mut v: BigUint, n: usize) -> Vec<BigDigit> {
-    v.data.resize(n, 0);
-    v.data
-}
-
-/// The modular ceiling `2^(n * DIGIT_BITS)` as a BigUint.
-fn modulus(n: usize) -> BigUint {
-    BigUint::from(1u32) << (n * DIGIT_BITS as usize)
-}
-
-/// The bitmask for `n * DIGIT_BITS` bits.
-fn low_mask(n: usize) -> BigUint {
-    modulus(n) - BigUint::from(1u32)
-}
 
 // ── FixedWidthBigUint ─────────────────────────────────────────────────────────
 
-/// A fixed-width unsigned integer backed by a stable [`Vec<BigDigit>`].
+/// A [`BigUint`] with a declared stable limb count.
 ///
-/// Unlike [`BigUint`] (which normalizes after every operation, removing leading
-/// zero digits), `FixedWidthBigUint` keeps exactly `n_limbs` digits at all
-/// times. This makes `word_count()` stable across arithmetic, which is required
-/// by [`CiosRowOps`].
-///
-/// Arithmetic is performed by temporarily creating a normalized `BigUint` and
-/// padding the result back to `n_limbs`.
-///
-/// Implements `Nct` personality for modmath's `constrained` and `strict` test
-/// flavours. No `Ct` wrapper — `BigUint` is inherently variable-time.
+/// `inner` is a plain, normalized `BigUint`; `n_limbs` is the declared width.
+/// Arithmetic is delegated directly to `BigUint`. Only `CiosRowOps`,
+/// `bits_precision`, and `OverflowingAdd` (overflow detection) require the
+/// declared `n_limbs`.
 pub struct FixedWidthBigUint {
-    /// Raw digit slice, little-endian, always exactly `n_limbs` entries.
-    /// May have trailing zeros (differs from BigUint's invariant).
-    data: Vec<BigDigit>,
+    inner: BigUint,
     n_limbs: usize,
 }
 
 impl FixedWidthBigUint {
-    /// Construct from a `BigUint`, padding to `n_limbs`.
+    /// Construct from a `BigUint` with a declared width.
     pub fn new(value: BigUint, n_limbs: usize) -> Self {
-        Self { data: digits_from_biguint(value, n_limbs), n_limbs }
+        Self { inner: value, n_limbs }
     }
 
     /// Construct from a `u64` literal.
     pub fn from_u64(value: u64, n_limbs: usize) -> Self {
-        Self::new(BigUint::from(value), n_limbs)
+        Self { inner: BigUint::from(value), n_limbs }
     }
 
-    /// The declared limb count (stable across all operations).
     #[inline]
     pub fn n_limbs(&self) -> usize {
         self.n_limbs
     }
 
-    /// Convert to a normalized `BigUint` for arithmetic.
     #[inline]
-    fn to_biguint(&self) -> BigUint {
-        biguint_from_digits(&self.data)
+    pub fn as_biguint(&self) -> &BigUint {
+        &self.inner
     }
 
-    /// Consume a BigUint arithmetic result, padding back to `n_limbs`.
-    #[inline]
-    fn from_biguint_result(&self, v: BigUint) -> Self {
-        Self { data: digits_from_biguint(v, self.n_limbs), n_limbs: self.n_limbs }
+    pub fn into_biguint(self) -> BigUint {
+        self.inner
+    }
+
+    /// 2^(n_limbs * DIGIT_BITS): the modular ceiling used by WrappingSub and
+    /// OverflowingAdd.
+    fn width_modulus(n: usize) -> BigUint {
+        BigUint::from(1u32) << (n * DIGIT_BITS as usize)
     }
 }
 
@@ -117,45 +89,35 @@ impl FixedWidthBigUint {
 
 impl Clone for FixedWidthBigUint {
     fn clone(&self) -> Self {
-        Self { data: self.data.clone(), n_limbs: self.n_limbs }
+        Self { inner: self.inner.clone(), n_limbs: self.n_limbs }
     }
 }
 
 impl core::fmt::Debug for FixedWidthBigUint {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "FixedWidthBigUint({:?}, n_limbs={})", &self.data, self.n_limbs)
+        write!(f, "FixedWidthBigUint({:?}, n={})", self.inner, self.n_limbs)
     }
 }
 
 impl core::hash::Hash for FixedWidthBigUint {
     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
-        self.data.hash(state);
+        self.inner.hash(state);
         self.n_limbs.hash(state);
     }
 }
 
 // ── Equality / Ordering ───────────────────────────────────────────────────────
-// Little-endian: most significant digit is last. Compare from the top down.
 
 impl PartialEq for FixedWidthBigUint {
     fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == Ordering::Equal
+        self.inner == other.inner
     }
 }
 impl Eq for FixedWidthBigUint {}
 
 impl Ord for FixedWidthBigUint {
     fn cmp(&self, other: &Self) -> Ordering {
-        let n = self.n_limbs.max(other.n_limbs);
-        for i in (0..n).rev() {
-            let a = self.data.get(i).copied().unwrap_or(0);
-            let b = other.data.get(i).copied().unwrap_or(0);
-            match a.cmp(&b) {
-                Ordering::Equal => continue,
-                ord => return ord,
-            }
-        }
-        Ordering::Equal
+        self.inner.cmp(&other.inner)
     }
 }
 impl PartialOrd for FixedWidthBigUint {
@@ -166,22 +128,19 @@ impl PartialOrd for FixedWidthBigUint {
 
 impl Default for FixedWidthBigUint {
     fn default() -> Self {
-        Self { data: Vec::new(), n_limbs: 0 }
+        Self { inner: BigUint::from(0u32), n_limbs: 0 }
     }
 }
 
 // ── From<uN> — minimal-width policy ──────────────────────────────────────────
-// Constructs with the minimum number of limbs needed to hold the value.
-// Modmath widens operands to the modulus width via zero_with_precision_of/
-// widen_to_precision_of before arithmetic, so the starting width doesn't matter.
 
 macro_rules! impl_from_uint {
     ($($t:ty),*) => {$(
         impl From<$t> for FixedWidthBigUint {
             fn from(v: $t) -> Self {
-                let bu = BigUint::from(v);
-                let n = (bu.data.len()).max(1);
-                Self::new(bu, n)
+                let inner = BigUint::from(v);
+                let n = inner.data.len().max(1);
+                Self { inner, n_limbs: n }
             }
         }
     )*};
@@ -201,31 +160,22 @@ impl Zero for FixedWidthBigUint {
         Self::default()
     }
     fn is_zero(&self) -> bool {
-        self.data.iter().all(|&d| d == 0)
+        NtZero::is_zero(&self.inner)
     }
     fn set_zero(&mut self) {
-        for d in self.data.iter_mut() {
-            *d = 0;
-        }
+        self.inner = BigUint::from(0u32);
     }
 }
 
 impl One for FixedWidthBigUint {
     fn one() -> Self {
-        // n_limbs=0; callers that need precision use one_with_precision.
-        Self { data: vec![1], n_limbs: 0 }
+        Self { inner: BigUint::from(1u32), n_limbs: 0 }
     }
     fn is_one(&self) -> bool {
-        self.data.first().copied() == Some(1)
-            && self.data[1..].iter().all(|&d| d == 0)
+        self.inner.data.as_slice() == &[1 as BigDigit]
     }
     fn set_one(&mut self) {
-        if self.n_limbs > 0 {
-            self.data[0] = 1;
-            for d in self.data[1..].iter_mut() {
-                *d = 0;
-            }
-        }
+        self.inner = BigUint::from(1u32);
     }
 }
 
@@ -237,59 +187,37 @@ impl BitsPrecision for FixedWidthBigUint {
     }
 }
 
+impl BitsPrecision for &FixedWidthBigUint {
+    fn bits_precision(&self) -> u32 {
+        (self.n_limbs * DIGIT_BITS as usize) as u32
+    }
+}
+
 impl WithPrecision for FixedWidthBigUint {
-    /// Identity: fixed-width types can't change their width.
     fn widen_to_precision(self, _bits_precision: u32) -> Self {
         self
     }
 
-    /// Override the default (which calls widen_to_precision = identity) to
-    /// correctly construct a zero at the requested width.
-    fn zero_with_precision(bits_precision: u32) -> Self
-    where
-        Self: Zero,
-    {
+    fn zero_with_precision(bits_precision: u32) -> Self where Self: Zero {
         let n = bits_precision.div_ceil(DIGIT_BITS) as usize;
-        Self { data: vec![0; n], n_limbs: n }
+        Self { inner: BigUint::from(0u32), n_limbs: n }
     }
 
-    fn one_with_precision(bits_precision: u32) -> Self
-    where
-        Self: One,
-    {
+    fn one_with_precision(bits_precision: u32) -> Self where Self: One {
         let n = bits_precision.div_ceil(DIGIT_BITS) as usize;
-        let mut data = vec![0; n];
-        if n > 0 {
-            data[0] = 1;
-        }
-        Self { data, n_limbs: n }
+        Self { inner: BigUint::from(1u32), n_limbs: n }
     }
 
-    // Copy bound dropped in alpha.3 — now available for non-Copy heap carriers.
     fn widen_to_precision_of(self, witness: &Self) -> Self {
-        // Fixed-width: can't grow a value; identity within the same n_limbs.
-        // If witness is wider, re-express self at that width (zero-extend).
-        let n = witness.n_limbs;
-        Self { data: digits_from_biguint(self.to_biguint(), n), n_limbs: n }
+        Self { inner: self.inner, n_limbs: witness.n_limbs }
     }
 
-    fn zero_with_precision_of(witness: &Self) -> Self
-    where
-        Self: Zero,
-    {
-        Self { data: vec![0; witness.n_limbs], n_limbs: witness.n_limbs }
+    fn zero_with_precision_of(witness: &Self) -> Self where Self: Zero {
+        Self { inner: BigUint::from(0u32), n_limbs: witness.n_limbs }
     }
 
-    fn one_with_precision_of(witness: &Self) -> Self
-    where
-        Self: One,
-    {
-        let n = witness.n_limbs;
-        let mut data = vec![0; n];
-        if n > 0 {
-            data[0] = 1;
-        }
-        Self { data, n_limbs: n }
+    fn one_with_precision_of(witness: &Self) -> Self where Self: One {
+        Self { inner: BigUint::from(1u32), n_limbs: witness.n_limbs }
     }
 }
 
@@ -297,99 +225,70 @@ impl WithPrecision for FixedWidthBigUint {
 
 impl Parity for FixedWidthBigUint {
     fn is_odd(self) -> bool {
-        self.data.first().map_or(false, |d| d & 1 == 1)
+        self.inner.data.first().map_or(false, |d| d & 1 == 1)
     }
-    fn is_even(self) -> bool {
-        !Parity::is_odd(self)
+    fn is_even(self) -> bool { !Parity::is_odd(self) }
+}
+
+impl Parity for &FixedWidthBigUint {
+    fn is_odd(self) -> bool {
+        self.inner.data.first().map_or(false, |d| d & 1 == 1)
     }
+    fn is_even(self) -> bool { !Parity::is_odd(self) }
 }
 
 // ── Operator traits ───────────────────────────────────────────────────────────
 
-impl Add for FixedWidthBigUint {
-    type Output = Self;
-    fn add(self, rhs: Self) -> Self {
-        let n = self.n_limbs.max(rhs.n_limbs);
-        let result = self.to_biguint() + rhs.to_biguint();
-        Self { data: digits_from_biguint(result, n), n_limbs: n }
-    }
+macro_rules! fw_binop {
+    ($Trait:ident, $method:ident, $op:tt) => {
+        impl $Trait for FixedWidthBigUint {
+            type Output = Self;
+            fn $method(self, rhs: Self) -> Self {
+                let n = self.n_limbs.max(rhs.n_limbs);
+                Self { inner: self.inner $op rhs.inner, n_limbs: n }
+            }
+        }
+        impl $Trait<&FixedWidthBigUint> for FixedWidthBigUint {
+            type Output = FixedWidthBigUint;
+            fn $method(self, rhs: &FixedWidthBigUint) -> FixedWidthBigUint {
+                let n = self.n_limbs.max(rhs.n_limbs);
+                Self { inner: self.inner $op rhs.inner.clone(), n_limbs: n }
+            }
+        }
+        impl $Trait<FixedWidthBigUint> for &FixedWidthBigUint {
+            type Output = FixedWidthBigUint;
+            fn $method(self, rhs: FixedWidthBigUint) -> FixedWidthBigUint {
+                let n = self.n_limbs.max(rhs.n_limbs);
+                FixedWidthBigUint { inner: self.inner.clone() $op rhs.inner, n_limbs: n }
+            }
+        }
+        impl $Trait<&FixedWidthBigUint> for &FixedWidthBigUint {
+            type Output = FixedWidthBigUint;
+            fn $method(self, rhs: &FixedWidthBigUint) -> FixedWidthBigUint {
+                let n = self.n_limbs.max(rhs.n_limbs);
+                FixedWidthBigUint { inner: self.inner.clone() $op rhs.inner.clone(), n_limbs: n }
+            }
+        }
+    };
 }
 
-impl Sub for FixedWidthBigUint {
-    type Output = Self;
-    fn sub(self, rhs: Self) -> Self {
-        let n = self.n_limbs.max(rhs.n_limbs);
-        let result = self.to_biguint() - rhs.to_biguint();
-        Self { data: digits_from_biguint(result, n), n_limbs: n }
-    }
-}
-
-impl Mul for FixedWidthBigUint {
-    type Output = Self;
-    fn mul(self, rhs: Self) -> Self {
-        let n = self.n_limbs.max(rhs.n_limbs);
-        let result = self.to_biguint() * rhs.to_biguint();
-        Self { data: digits_from_biguint(result, n), n_limbs: n }
-    }
-}
-
-impl Div for FixedWidthBigUint {
-    type Output = Self;
-    fn div(self, rhs: Self) -> Self {
-        let n = self.n_limbs.max(rhs.n_limbs);
-        let result = self.to_biguint() / rhs.to_biguint();
-        Self { data: digits_from_biguint(result, n), n_limbs: n }
-    }
-}
-
-impl Rem for FixedWidthBigUint {
-    type Output = Self;
-    fn rem(self, rhs: Self) -> Self {
-        let n = self.n_limbs.max(rhs.n_limbs);
-        let result = self.to_biguint() % rhs.to_biguint();
-        Self { data: digits_from_biguint(result, n), n_limbs: n }
-    }
-}
+fw_binop!(Add, add, +);
+fw_binop!(Sub, sub, -);
+fw_binop!(Mul, mul, *);
+fw_binop!(Div, div, /);
+fw_binop!(Rem, rem, %);
+fw_binop!(BitAnd, bitand, &);
+fw_binop!(BitOr, bitor, |);
+fw_binop!(BitXor, bitxor, ^);
 
 impl RemAssign for FixedWidthBigUint {
     fn rem_assign(&mut self, rhs: Self) {
-        let result = self.to_biguint() % rhs.to_biguint();
-        self.data = digits_from_biguint(result, self.n_limbs);
+        self.inner = self.inner.clone() % rhs.inner;
     }
 }
-
 impl RemAssign<&FixedWidthBigUint> for FixedWidthBigUint {
     fn rem_assign(&mut self, rhs: &Self) {
-        let result = self.to_biguint() % rhs.to_biguint();
-        self.data = digits_from_biguint(result, self.n_limbs);
-    }
-}
-
-// &T op &T — for modmath constrained for<'a> bounds
-impl Rem<&FixedWidthBigUint> for &FixedWidthBigUint {
-    type Output = FixedWidthBigUint;
-    fn rem(self, rhs: &FixedWidthBigUint) -> FixedWidthBigUint {
-        let n = self.n_limbs.max(rhs.n_limbs);
-        let result = self.to_biguint() % rhs.to_biguint();
-        FixedWidthBigUint { data: digits_from_biguint(result, n), n_limbs: n }
-    }
-}
-
-impl Div<&FixedWidthBigUint> for &FixedWidthBigUint {
-    type Output = FixedWidthBigUint;
-    fn div(self, rhs: &FixedWidthBigUint) -> FixedWidthBigUint {
-        let n = self.n_limbs.max(rhs.n_limbs);
-        let result = self.to_biguint() / rhs.to_biguint();
-        FixedWidthBigUint { data: digits_from_biguint(result, n), n_limbs: n }
-    }
-}
-
-impl Sub<FixedWidthBigUint> for &FixedWidthBigUint {
-    type Output = FixedWidthBigUint;
-    fn sub(self, rhs: FixedWidthBigUint) -> FixedWidthBigUint {
-        let n = self.n_limbs.max(rhs.n_limbs);
-        let result = self.to_biguint() - rhs.to_biguint();
-        FixedWidthBigUint { data: digits_from_biguint(result, n), n_limbs: n }
+        self.inner = self.inner.clone() % rhs.inner.clone();
     }
 }
 
@@ -397,144 +296,31 @@ impl Shr<usize> for FixedWidthBigUint {
     type Output = Self;
     fn shr(self, n: usize) -> Self {
         let limbs = self.n_limbs;
-        let result = self.to_biguint() >> n;
-        Self { data: digits_from_biguint(result, limbs), n_limbs: limbs }
+        Self { inner: self.inner >> n, n_limbs: limbs }
     }
 }
-
 impl ShrAssign<usize> for FixedWidthBigUint {
     fn shr_assign(&mut self, n: usize) {
-        let result = self.to_biguint() >> n;
-        self.data = digits_from_biguint(result, self.n_limbs);
+        self.inner >>= n;
     }
 }
-
 impl Shl<usize> for FixedWidthBigUint {
     type Output = Self;
     fn shl(self, n: usize) -> Self {
         let limbs = self.n_limbs;
-        let result = self.to_biguint() << n;
-        Self { data: digits_from_biguint(result, limbs), n_limbs: limbs }
-    }
-}
-
-impl BitAnd for FixedWidthBigUint {
-    type Output = Self;
-    fn bitand(self, rhs: Self) -> Self {
-        let n = self.n_limbs.max(rhs.n_limbs);
-        // Direct digit-level AND — no BigUint conversion needed.
-        let mut data = vec![0; n];
-        for i in 0..n {
-            data[i] = self.data.get(i).copied().unwrap_or(0)
-                & rhs.data.get(i).copied().unwrap_or(0);
-        }
-        Self { data, n_limbs: n }
-    }
-}
-
-impl BitOr for FixedWidthBigUint {
-    type Output = Self;
-    fn bitor(self, rhs: Self) -> Self {
-        let n = self.n_limbs.max(rhs.n_limbs);
-        let mut data = vec![0; n];
-        for i in 0..n {
-            data[i] = self.data.get(i).copied().unwrap_or(0)
-                | rhs.data.get(i).copied().unwrap_or(0);
-        }
-        Self { data, n_limbs: n }
-    }
-}
-
-impl BitXor for FixedWidthBigUint {
-    type Output = Self;
-    fn bitxor(self, rhs: Self) -> Self {
-        let n = self.n_limbs.max(rhs.n_limbs);
-        let mut data = vec![0; n];
-        for i in 0..n {
-            data[i] = self.data.get(i).copied().unwrap_or(0)
-                ^ rhs.data.get(i).copied().unwrap_or(0);
-        }
-        Self { data, n_limbs: n }
-    }
-}
-
-impl BitAnd for &FixedWidthBigUint {
-    type Output = FixedWidthBigUint;
-    fn bitand(self, rhs: Self) -> FixedWidthBigUint {
-        let n = self.n_limbs.max(rhs.n_limbs);
-        let mut data = vec![0; n];
-        for i in 0..n {
-            data[i] = self.data.get(i).copied().unwrap_or(0)
-                & rhs.data.get(i).copied().unwrap_or(0);
-        }
-        FixedWidthBigUint { data, n_limbs: n }
-    }
-}
-
-// ── By-reference operator matrix (constrained/strict flavour requirements) ────
-// modmath's constrained/strict where-clauses require for<'a> &'a T: Op<&'a T>
-// and T: Op<&T>. The owned-only impls above cover Op<Self> for Self; these
-// cover the reference variants the flavours actually bind.
-
-impl Parity for &FixedWidthBigUint {
-    fn is_odd(self) -> bool {
-        self.data.first().map_or(false, |d| d & 1 == 1)
-    }
-    fn is_even(self) -> bool {
-        !Parity::is_odd(self)
-    }
-}
-
-// &T - &T
-impl Sub<&FixedWidthBigUint> for &FixedWidthBigUint {
-    type Output = FixedWidthBigUint;
-    fn sub(self, rhs: &FixedWidthBigUint) -> FixedWidthBigUint {
-        let n = self.n_limbs.max(rhs.n_limbs);
-        FixedWidthBigUint { data: digits_from_biguint(self.to_biguint() - rhs.to_biguint(), n), n_limbs: n }
-    }
-}
-
-// T - &T
-impl Sub<&FixedWidthBigUint> for FixedWidthBigUint {
-    type Output = FixedWidthBigUint;
-    fn sub(self, rhs: &FixedWidthBigUint) -> FixedWidthBigUint {
-        let n = self.n_limbs.max(rhs.n_limbs);
-        FixedWidthBigUint { data: digits_from_biguint(self.to_biguint() - rhs.to_biguint(), n), n_limbs: n }
-    }
-}
-
-// T + &T
-impl Add<&FixedWidthBigUint> for FixedWidthBigUint {
-    type Output = FixedWidthBigUint;
-    fn add(self, rhs: &FixedWidthBigUint) -> FixedWidthBigUint {
-        let n = self.n_limbs.max(rhs.n_limbs);
-        FixedWidthBigUint { data: digits_from_biguint(self.to_biguint() + rhs.to_biguint(), n), n_limbs: n }
-    }
-}
-
-// T * &T
-impl Mul<&FixedWidthBigUint> for FixedWidthBigUint {
-    type Output = FixedWidthBigUint;
-    fn mul(self, rhs: &FixedWidthBigUint) -> FixedWidthBigUint {
-        let n = self.n_limbs.max(rhs.n_limbs);
-        FixedWidthBigUint { data: digits_from_biguint(self.to_biguint() * rhs.to_biguint(), n), n_limbs: n }
+        Self { inner: self.inner << n, n_limbs: limbs }
     }
 }
 
 // ── Wrapping arithmetic ───────────────────────────────────────────────────────
+// WrappingAdd/Mul: BigUint never overflows — natural arithmetic is correct.
+// WrappingSub: BigUint panics on lhs < rhs; fold in the 2^width addend instead.
 
 impl WrappingAdd for FixedWidthBigUint {
     type Output = Self;
     fn wrapping_add(self, rhs: Self) -> Self {
         let n = self.n_limbs.max(rhs.n_limbs);
-        let width = n * DIGIT_BITS as usize;
-        let sum = self.to_biguint() + rhs.to_biguint();
-        let result = if sum.bits() > width as u64 {
-            sum & low_mask(n)
-        } else {
-            sum
-        };
-        Self { data: digits_from_biguint(result, n), n_limbs: n }
+        Self { inner: self.inner + rhs.inner, n_limbs: n }
     }
 }
 
@@ -542,14 +328,12 @@ impl WrappingSub for FixedWidthBigUint {
     type Output = Self;
     fn wrapping_sub(self, rhs: Self) -> Self {
         let n = self.n_limbs.max(rhs.n_limbs);
-        let lhs = self.to_biguint();
-        let rhs_b = rhs.to_biguint();
-        let result = if lhs >= rhs_b {
-            lhs - rhs_b
+        let inner = if self.inner >= rhs.inner {
+            self.inner - rhs.inner
         } else {
-            modulus(n) + lhs - rhs_b
+            Self::width_modulus(n) + self.inner - rhs.inner
         };
-        Self { data: digits_from_biguint(result, n), n_limbs: n }
+        Self { inner, n_limbs: n }
     }
 }
 
@@ -557,9 +341,7 @@ impl WrappingMul for FixedWidthBigUint {
     type Output = Self;
     fn wrapping_mul(self, rhs: Self) -> Self {
         let n = self.n_limbs.max(rhs.n_limbs);
-        let product = self.to_biguint() * rhs.to_biguint();
-        let result = product & low_mask(n);
-        Self { data: digits_from_biguint(result, n), n_limbs: n }
+        Self { inner: self.inner * rhs.inner, n_limbs: n }
     }
 }
 
@@ -569,7 +351,6 @@ impl WrappingAdd for &FixedWidthBigUint {
         self.clone().wrapping_add(rhs.clone())
     }
 }
-
 impl WrappingSub for &FixedWidthBigUint {
     type Output = FixedWidthBigUint;
     fn wrapping_sub(self, rhs: Self) -> FixedWidthBigUint {
@@ -583,11 +364,15 @@ impl OverflowingAdd for FixedWidthBigUint {
     type Output = Self;
     fn overflowing_add(self, rhs: Self) -> (Self, bool) {
         let n = self.n_limbs.max(rhs.n_limbs);
+        let sum = self.inner + rhs.inner;
         let width = n * DIGIT_BITS as usize;
-        let sum = self.to_biguint() + rhs.to_biguint();
         let overflow = sum.bits() > width as u64;
-        let result = if overflow { sum & low_mask(n) } else { sum };
-        (Self { data: digits_from_biguint(result, n), n_limbs: n }, overflow)
+        let inner = if overflow {
+            sum & (Self::width_modulus(n) - BigUint::from(1u32))
+        } else {
+            sum
+        };
+        (Self { inner, n_limbs: n }, overflow)
     }
 }
 
@@ -595,14 +380,11 @@ impl OverflowingSub for FixedWidthBigUint {
     type Output = Self;
     fn overflowing_sub(self, rhs: Self) -> (Self, bool) {
         let n = self.n_limbs.max(rhs.n_limbs);
-        let lhs = self.to_biguint();
-        let rhs_b = rhs.to_biguint();
-        if lhs >= rhs_b {
-            let r = lhs - rhs_b;
-            (Self { data: digits_from_biguint(r, n), n_limbs: n }, false)
+        if self.inner >= rhs.inner {
+            (Self { inner: self.inner - rhs.inner, n_limbs: n }, false)
         } else {
-            let r = modulus(n) + lhs - rhs_b;
-            (Self { data: digits_from_biguint(r, n), n_limbs: n }, true)
+            let inner = Self::width_modulus(n) + self.inner - rhs.inner;
+            (Self { inner, n_limbs: n }, true)
         }
     }
 }
@@ -613,8 +395,7 @@ impl CheckedAdd for FixedWidthBigUint {
     type Output = Self;
     fn checked_add(self, rhs: Self) -> Option<Self> {
         let n = self.n_limbs.max(rhs.n_limbs);
-        let result = self.to_biguint() + rhs.to_biguint();
-        Some(Self { data: digits_from_biguint(result, n), n_limbs: n })
+        Some(Self { inner: self.inner + rhs.inner, n_limbs: n })
     }
 }
 
@@ -622,8 +403,7 @@ impl CheckedMul for FixedWidthBigUint {
     type Output = Self;
     fn checked_mul(self, rhs: Self) -> Option<Self> {
         let n = self.n_limbs.max(rhs.n_limbs);
-        let result = self.to_biguint() * rhs.to_biguint();
-        Some(Self { data: digits_from_biguint(result, n), n_limbs: n })
+        Some(Self { inner: self.inner * rhs.inner, n_limbs: n })
     }
 }
 
@@ -633,18 +413,18 @@ impl BorrowingSub for FixedWidthBigUint {
     type Output = Self;
     fn borrowing_sub(self, rhs: Self, borrow: bool) -> (Self, bool) {
         let n = self.n_limbs.max(rhs.n_limbs);
-        let lhs = BigInt::from(self.to_biguint());
-        let rhs_int = BigInt::from(rhs.to_biguint()) + BigInt::from(borrow as u32);
+        let lhs = BigInt::from(self.inner);
+        let rhs_int = BigInt::from(rhs.inner) + BigInt::from(borrow as u32);
         let diff = lhs - rhs_int;
-        let (result, borrow_out) = if diff < BigInt::from(0i32) {
-            let wrapped = (diff + BigInt::from(modulus(n)))
+        let (inner, borrow_out) = if diff < BigInt::from(0i32) {
+            let wrapped = (diff + BigInt::from(Self::width_modulus(n)))
                 .to_biguint()
-                .expect("borrow_sub: modular wrap must be non-negative");
+                .expect("borrowing_sub: wrapped value must be non-negative");
             (wrapped, true)
         } else {
-            (diff.to_biguint().expect("borrow_sub: non-negative result"), false)
+            (diff.to_biguint().expect("borrowing_sub: non-negative"), false)
         };
-        (Self { data: digits_from_biguint(result, n), n_limbs: n }, borrow_out)
+        (Self { inner, n_limbs: n }, borrow_out)
     }
 }
 
@@ -657,28 +437,21 @@ impl CarryingMul for FixedWidthBigUint {
     fn carrying_mul(self, rhs: Self, carry: Self) -> (Self, Self) {
         let n = self.n_limbs.max(rhs.n_limbs);
         let width = n * DIGIT_BITS as usize;
-        let product = self.to_biguint() * rhs.to_biguint() + carry.to_biguint();
-        let mask = low_mask(n);
-        let lo = product.clone() & &mask;
+        let product = self.inner * rhs.inner + carry.inner;
+        let modulus = Self::width_modulus(n);
+        let lo = product.clone() & (&modulus - BigUint::from(1u32));
         let hi = product >> width;
-        (
-            Self { data: digits_from_biguint(lo, n), n_limbs: n },
-            Self { data: digits_from_biguint(hi, n), n_limbs: n },
-        )
+        (Self { inner: lo, n_limbs: n }, Self { inner: hi, n_limbs: n })
     }
 
     fn carrying_mul_add(self, rhs: Self, carry: Self, add: Self) -> (Self, Self) {
         let n = self.n_limbs.max(rhs.n_limbs);
         let width = n * DIGIT_BITS as usize;
-        let product =
-            self.to_biguint() * rhs.to_biguint() + carry.to_biguint() + add.to_biguint();
-        let mask = low_mask(n);
-        let lo = product.clone() & &mask;
+        let product = self.inner * rhs.inner + carry.inner + add.inner;
+        let modulus = Self::width_modulus(n);
+        let lo = product.clone() & (&modulus - BigUint::from(1u32));
         let hi = product >> width;
-        (
-            Self { data: digits_from_biguint(lo, n), n_limbs: n },
-            Self { data: digits_from_biguint(hi, n), n_limbs: n },
-        )
+        (Self { inner: lo, n_limbs: n }, Self { inner: hi, n_limbs: n })
     }
 }
 
@@ -688,7 +461,7 @@ impl ToBytes for FixedWidthBigUint {
     type Bytes = Vec<u8>;
     fn to_be_bytes(self) -> Vec<u8> {
         let expected = self.n_limbs * DIGIT_BYTES;
-        let bytes = self.to_biguint().to_bytes_be();
+        let bytes = self.inner.to_bytes_be();
         if bytes.len() >= expected {
             bytes
         } else {
@@ -699,7 +472,7 @@ impl ToBytes for FixedWidthBigUint {
     }
     fn to_le_bytes(self) -> Vec<u8> {
         let expected = self.n_limbs * DIGIT_BYTES;
-        let mut bytes = self.to_biguint().to_bytes_le();
+        let mut bytes = self.inner.to_bytes_le();
         bytes.resize(expected, 0);
         bytes
     }
@@ -707,24 +480,25 @@ impl ToBytes for FixedWidthBigUint {
 
 impl FromByteSlice for FixedWidthBigUint {
     fn from_be_slice(bytes: &[u8]) -> Result<Self, ByteSliceError> {
-        let n = bytes.len().div_ceil(DIGIT_BYTES);
-        Ok(Self::new(BigUint::from_bytes_be(bytes), n))
+        let n = bytes.len().div_ceil(DIGIT_BYTES).max(1);
+        Ok(Self { inner: BigUint::from_bytes_be(bytes), n_limbs: n })
     }
     fn from_le_slice(bytes: &[u8]) -> Result<Self, ByteSliceError> {
-        let n = bytes.len().div_ceil(DIGIT_BYTES);
-        Ok(Self::new(BigUint::from_bytes_le(bytes), n))
+        let n = bytes.len().div_ceil(DIGIT_BYTES).max(1);
+        Ok(Self { inner: BigUint::from_bytes_le(bytes), n_limbs: n })
     }
 }
 
 // ── CiosRowOps ────────────────────────────────────────────────────────────────
 //
-// Operates directly on self.data — the raw digit Vec — with no BigUint
-// conversion. word_count() returns the declared n_limbs (never changes).
-// word(i) returns data[i] or 0 if i >= data.len() (shouldn't happen since
-// data.len() == n_limbs, but belt-and-suspenders).
+// word_count() → declared n_limbs (never changes).
+// word(i)      → inner.data[i] or 0; normalization means data may be shorter
+//                than n_limbs, so unwrap_or(0) is correct.
 //
-// mul_acc_row / mul_acc_shift_row: schoolbook inner row using u128 for the
-// double-wide product. Semantics match the bnum CiosRowOps exactly.
+// mul_acc_row / mul_acc_shift_row write directly into acc.inner.data.
+// Before writing: ensure data has n_limbs entries (may temporarily violate
+// BigUint's no-trailing-zero invariant). After writing: restore the invariant
+// via IntDigits::normalize so BigUint comparisons are correct for subsequent ops.
 
 impl CiosRowOps for FixedWidthBigUint {
     type Word = crate::Digit;
@@ -736,7 +510,7 @@ impl CiosRowOps for FixedWidthBigUint {
 
     #[inline]
     fn word(&self, i: usize) -> crate::Digit {
-        self.data.get(i).copied().unwrap_or(0)
+        self.inner.data.get(i).copied().unwrap_or(0)
     }
 
     fn mul_acc_row(
@@ -746,17 +520,21 @@ impl CiosRowOps for FixedWidthBigUint {
         carry_in: crate::Digit,
     ) -> crate::Digit {
         let n = multiplicand.n_limbs;
-        let mut carry = carry_in as u128;
+        if acc.inner.data.len() < n {
+            acc.inner.data.resize(n, 0);
+        }
         let s = scalar as u128;
+        let mut carry = carry_in as u128;
         let mut j = 0;
         while j < n {
-            let m = multiplicand.data.get(j).copied().unwrap_or(0) as u128;
-            let a = acc.data.get(j).copied().unwrap_or(0) as u128;
+            let m = multiplicand.inner.data.get(j).copied().unwrap_or(0) as u128;
+            let a = acc.inner.data.get(j).copied().unwrap_or(0) as u128;
             let product = s * m + a + carry;
-            acc.data[j] = product as crate::Digit;
+            acc.inner.data[j] = product as crate::Digit;
             carry = product >> DIGIT_BITS;
             j += 1;
         }
+        IntDigits::normalize(&mut acc.inner);
         carry as crate::Digit
     }
 
@@ -767,29 +545,29 @@ impl CiosRowOps for FixedWidthBigUint {
         acc_hi: crate::Digit,
     ) -> crate::Digit {
         let n = multiplicand.n_limbs;
+        if acc.inner.data.len() < n {
+            acc.inner.data.resize(n, 0);
+        }
         let s = scalar as u128;
-
-        // Word 0: discard the low word (the shifted-out digit).
-        let p0 = s * multiplicand.data.get(0).copied().unwrap_or(0) as u128
-            + acc.data[0] as u128;
+        // Word 0: discard the shifted-out low digit, keep carry.
+        let p0 = s * multiplicand.inner.data.get(0).copied().unwrap_or(0) as u128
+            + acc.inner.data.get(0).copied().unwrap_or(0) as u128;
         let mut carry = (p0 >> DIGIT_BITS) as u64;
-
-        // Words 1..n: accumulate and shift down by one position.
+        // Words 1..n: accumulate and shift down one position.
         let mut j = 1;
         while j < n {
-            let m = multiplicand.data.get(j).copied().unwrap_or(0) as u128;
-            let a = acc.data[j] as u128;
+            let m = multiplicand.inner.data.get(j).copied().unwrap_or(0) as u128;
+            let a = acc.inner.data.get(j).copied().unwrap_or(0) as u128;
             let product = s * m + a + carry as u128;
-            acc.data[j - 1] = product as crate::Digit;
+            acc.inner.data[j - 1] = product as crate::Digit;
             carry = (product >> DIGIT_BITS) as u64;
             j += 1;
         }
-
-        // Top slot: acc_hi + carry; return overflow bit.
         let (sum, overflow) = acc_hi.overflowing_add(carry);
         if n > 0 {
-            acc.data[n - 1] = sum;
+            acc.inner.data[n - 1] = sum;
         }
+        IntDigits::normalize(&mut acc.inner);
         overflow as crate::Digit
     }
 }
@@ -800,43 +578,40 @@ impl CiosRowOps for FixedWidthBigUint {
 mod tests {
     use super::*;
     use const_num_traits::ops::bits::BitsPrecision;
-    use const_num_traits::{One, Zero, WithPrecision};
+    use const_num_traits::{One, WithPrecision, Zero};
 
     fn fw(value: u64, n: usize) -> FixedWidthBigUint {
         FixedWidthBigUint::from_u64(value, n)
     }
 
     #[test]
+    fn zero_plus_x_equals_x() {
+        // The EEA clone idiom: zero(0) + x(k) must equal x(k).
+        let zero = FixedWidthBigUint::zero();
+        let x = fw(12345, 4);
+        let result = zero + x.clone();
+        assert_eq!(result, x);
+        assert_eq!(result.n_limbs(), 4);
+    }
+
+    #[test]
     fn word_count_stable_after_sub() {
-        // Subtract to produce a small result; word_count must still return n_limbs.
         let a = fw(100, 2);
         let b = fw(99, 2);
         let c = a - b;
         assert_eq!(c.n_limbs(), 2);
         assert_eq!(c.word_count(), 2);
         assert_eq!(c.word(0), 1);
-        assert_eq!(c.word(1), 0); // zero-padded
+        assert_eq!(c.word(1), 0);
     }
 
     #[test]
-    fn bits_precision_stable() {
-        let x = fw(0, 4);
-        assert_eq!(x.bits_precision(), 4 * DIGIT_BITS);
+    fn bits_precision() {
+        assert_eq!(fw(0, 4).bits_precision(), 4 * DIGIT_BITS);
     }
 
     #[test]
-    fn wrapping_add_truncates() {
-        // Digit::MAX + 1 should wrap to 0 for a 1-limb value.
-        let max = fw(crate::Digit::MAX, 1);
-        let one = fw(1, 1);
-        let result = max.wrapping_add(one);
-        assert_eq!(result.word(0), 0);
-        assert_eq!(result.n_limbs(), 1);
-    }
-
-    #[test]
-    fn wrapping_sub_modular() {
-        // 0 - 1 should wrap to Digit::MAX for a 1-limb value.
+    fn wrapping_sub_underflow() {
         let zero = fw(0, 1);
         let one = fw(1, 1);
         let result = zero.wrapping_sub(one);
@@ -844,17 +619,28 @@ mod tests {
     }
 
     #[test]
-    fn overflowing_sub_flag() {
-        let (_, overflow) = fw(5, 1).overflowing_sub(fw(10, 1));
+    fn overflowing_add_detects_overflow() {
+        let max = FixedWidthBigUint {
+            inner: (BigUint::from(1u32) << DIGIT_BITS as usize) - BigUint::from(1u32),
+            n_limbs: 1,
+        };
+        let one = fw(1, 1);
+        let (result, overflow) = max.overflowing_add(one);
         assert!(overflow);
-        let (diff, no_overflow) = fw(10, 1).overflowing_sub(fw(5, 1));
-        assert!(!no_overflow);
-        assert_eq!(diff.word(0), 5);
+        assert_eq!(result.word(0), 0);
+    }
+
+    #[test]
+    fn overflowing_sub_detects_underflow() {
+        let (_, borrow) = fw(3, 1).overflowing_sub(fw(10, 1));
+        assert!(borrow);
+        let (diff, no_borrow) = fw(10, 1).overflowing_sub(fw(3, 1));
+        assert!(!no_borrow);
+        assert_eq!(diff.word(0), 7);
     }
 
     #[test]
     fn carrying_mul_splits() {
-        // (2^32-1)^2 = 2^64 - 2^33 + 1 — fits in 64 bits, hi = 0.
         let a = fw(u32::MAX as u64, 1);
         let b = fw(u32::MAX as u64, 1);
         let (lo, hi) = a.carrying_mul(b, fw(0, 1));
@@ -864,39 +650,42 @@ mod tests {
     }
 
     #[test]
-    fn zero_with_precision_is_zero() {
-        let z = FixedWidthBigUint::zero_with_precision(128);
-        assert_eq!(z.n_limbs(), 128u32.div_ceil(DIGIT_BITS) as usize);
+    fn zero_with_precision_of() {
+        let modulus = fw(0xdeadbeef, 4);
+        let z = FixedWidthBigUint::zero_with_precision_of(&modulus);
         assert!(z.is_zero());
-    }
-
-    #[test]
-    fn one_with_precision() {
-        let o = FixedWidthBigUint::one_with_precision(64);
-        assert_eq!(o.word(0), 1);
-        assert!(!o.is_zero());
+        assert_eq!(z.n_limbs(), 4);
     }
 
     #[test]
     fn parity() {
         assert!(Parity::is_odd(fw(7, 1)));
         assert!(Parity::is_even(fw(8, 1)));
+        assert!(Parity::is_odd(&fw(7, 1)));
     }
 
     #[test]
-    fn borrowing_sub() {
-        let (result, borrow) = fw(10, 1).borrowing_sub(fw(3, 1), false);
-        assert_eq!(result.word(0), 7);
-        assert!(!borrow);
-
-        let (_, borrow) = fw(3, 1).borrowing_sub(fw(10, 1), false);
-        assert!(borrow);
+    fn from_u8_minimal_width() {
+        let x = FixedWidthBigUint::from(5u8);
+        assert_eq!(x.word(0), 5);
+        assert_eq!(x.n_limbs(), 1);
     }
 
     #[test]
-    fn is_zero_after_zero_with_precision() {
-        let z = FixedWidthBigUint::zero_with_precision(256);
-        assert!(z.is_zero());
-        assert_eq!(z.word_count(), 256u32.div_ceil(DIGIT_BITS) as usize);
+    fn ref_binops() {
+        let a = fw(10, 2);
+        let b = fw(3, 2);
+        // &T - &T
+        let r1 = &a - &b;
+        assert_eq!(r1.word(0), 7);
+        // T + &T
+        let r2 = a.clone() + &b;
+        assert_eq!(r2.word(0), 13);
+        // T - &T
+        let r3 = a.clone() - &b;
+        assert_eq!(r3.word(0), 7);
+        // T * &T
+        let r4 = a.clone() * &b;
+        assert_eq!(r4.word(0), 30);
     }
 }

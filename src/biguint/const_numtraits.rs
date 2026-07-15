@@ -309,7 +309,7 @@ impl Parity for FixedWidthBigUint {
 impl Add for FixedWidthBigUint {
     type Output = Self;
     fn add(self, rhs: Self) -> Self {
-        let n = self.n_limbs;
+        let n = self.n_limbs.max(rhs.n_limbs);
         let result = self.to_biguint() + rhs.to_biguint();
         Self { data: digits_from_biguint(result, n), n_limbs: n }
     }
@@ -318,7 +318,7 @@ impl Add for FixedWidthBigUint {
 impl Sub for FixedWidthBigUint {
     type Output = Self;
     fn sub(self, rhs: Self) -> Self {
-        let n = self.n_limbs;
+        let n = self.n_limbs.max(rhs.n_limbs);
         let result = self.to_biguint() - rhs.to_biguint();
         Self { data: digits_from_biguint(result, n), n_limbs: n }
     }
@@ -327,7 +327,7 @@ impl Sub for FixedWidthBigUint {
 impl Mul for FixedWidthBigUint {
     type Output = Self;
     fn mul(self, rhs: Self) -> Self {
-        let n = self.n_limbs;
+        let n = self.n_limbs.max(rhs.n_limbs);
         let result = self.to_biguint() * rhs.to_biguint();
         Self { data: digits_from_biguint(result, n), n_limbs: n }
     }
@@ -336,7 +336,7 @@ impl Mul for FixedWidthBigUint {
 impl Div for FixedWidthBigUint {
     type Output = Self;
     fn div(self, rhs: Self) -> Self {
-        let n = self.n_limbs;
+        let n = self.n_limbs.max(rhs.n_limbs);
         let result = self.to_biguint() / rhs.to_biguint();
         Self { data: digits_from_biguint(result, n), n_limbs: n }
     }
@@ -345,7 +345,7 @@ impl Div for FixedWidthBigUint {
 impl Rem for FixedWidthBigUint {
     type Output = Self;
     fn rem(self, rhs: Self) -> Self {
-        let n = self.n_limbs;
+        let n = self.n_limbs.max(rhs.n_limbs);
         let result = self.to_biguint() % rhs.to_biguint();
         Self { data: digits_from_biguint(result, n), n_limbs: n }
     }
@@ -369,7 +369,7 @@ impl RemAssign<&FixedWidthBigUint> for FixedWidthBigUint {
 impl Rem<&FixedWidthBigUint> for &FixedWidthBigUint {
     type Output = FixedWidthBigUint;
     fn rem(self, rhs: &FixedWidthBigUint) -> FixedWidthBigUint {
-        let n = self.n_limbs;
+        let n = self.n_limbs.max(rhs.n_limbs);
         let result = self.to_biguint() % rhs.to_biguint();
         FixedWidthBigUint { data: digits_from_biguint(result, n), n_limbs: n }
     }
@@ -378,7 +378,7 @@ impl Rem<&FixedWidthBigUint> for &FixedWidthBigUint {
 impl Div<&FixedWidthBigUint> for &FixedWidthBigUint {
     type Output = FixedWidthBigUint;
     fn div(self, rhs: &FixedWidthBigUint) -> FixedWidthBigUint {
-        let n = self.n_limbs;
+        let n = self.n_limbs.max(rhs.n_limbs);
         let result = self.to_biguint() / rhs.to_biguint();
         FixedWidthBigUint { data: digits_from_biguint(result, n), n_limbs: n }
     }
@@ -387,7 +387,7 @@ impl Div<&FixedWidthBigUint> for &FixedWidthBigUint {
 impl Sub<FixedWidthBigUint> for &FixedWidthBigUint {
     type Output = FixedWidthBigUint;
     fn sub(self, rhs: FixedWidthBigUint) -> FixedWidthBigUint {
-        let n = self.n_limbs;
+        let n = self.n_limbs.max(rhs.n_limbs);
         let result = self.to_biguint() - rhs.to_biguint();
         FixedWidthBigUint { data: digits_from_biguint(result, n), n_limbs: n }
     }
@@ -421,7 +421,7 @@ impl Shl<usize> for FixedWidthBigUint {
 impl BitAnd for FixedWidthBigUint {
     type Output = Self;
     fn bitand(self, rhs: Self) -> Self {
-        let n = self.n_limbs;
+        let n = self.n_limbs.max(rhs.n_limbs);
         // Direct digit-level AND — no BigUint conversion needed.
         let mut data = vec![0; n];
         for i in 0..n {
@@ -435,7 +435,7 @@ impl BitAnd for FixedWidthBigUint {
 impl BitOr for FixedWidthBigUint {
     type Output = Self;
     fn bitor(self, rhs: Self) -> Self {
-        let n = self.n_limbs;
+        let n = self.n_limbs.max(rhs.n_limbs);
         let mut data = vec![0; n];
         for i in 0..n {
             data[i] = self.data.get(i).copied().unwrap_or(0)
@@ -448,7 +448,7 @@ impl BitOr for FixedWidthBigUint {
 impl BitXor for FixedWidthBigUint {
     type Output = Self;
     fn bitxor(self, rhs: Self) -> Self {
-        let n = self.n_limbs;
+        let n = self.n_limbs.max(rhs.n_limbs);
         let mut data = vec![0; n];
         for i in 0..n {
             data[i] = self.data.get(i).copied().unwrap_or(0)
@@ -461,7 +461,7 @@ impl BitXor for FixedWidthBigUint {
 impl BitAnd for &FixedWidthBigUint {
     type Output = FixedWidthBigUint;
     fn bitand(self, rhs: Self) -> FixedWidthBigUint {
-        let n = self.n_limbs;
+        let n = self.n_limbs.max(rhs.n_limbs);
         let mut data = vec![0; n];
         for i in 0..n {
             data[i] = self.data.get(i).copied().unwrap_or(0)
@@ -489,7 +489,7 @@ impl Parity for &FixedWidthBigUint {
 impl Sub<&FixedWidthBigUint> for &FixedWidthBigUint {
     type Output = FixedWidthBigUint;
     fn sub(self, rhs: &FixedWidthBigUint) -> FixedWidthBigUint {
-        let n = self.n_limbs;
+        let n = self.n_limbs.max(rhs.n_limbs);
         FixedWidthBigUint { data: digits_from_biguint(self.to_biguint() - rhs.to_biguint(), n), n_limbs: n }
     }
 }
@@ -498,7 +498,7 @@ impl Sub<&FixedWidthBigUint> for &FixedWidthBigUint {
 impl Sub<&FixedWidthBigUint> for FixedWidthBigUint {
     type Output = FixedWidthBigUint;
     fn sub(self, rhs: &FixedWidthBigUint) -> FixedWidthBigUint {
-        let n = self.n_limbs;
+        let n = self.n_limbs.max(rhs.n_limbs);
         FixedWidthBigUint { data: digits_from_biguint(self.to_biguint() - rhs.to_biguint(), n), n_limbs: n }
     }
 }
@@ -507,7 +507,7 @@ impl Sub<&FixedWidthBigUint> for FixedWidthBigUint {
 impl Add<&FixedWidthBigUint> for FixedWidthBigUint {
     type Output = FixedWidthBigUint;
     fn add(self, rhs: &FixedWidthBigUint) -> FixedWidthBigUint {
-        let n = self.n_limbs;
+        let n = self.n_limbs.max(rhs.n_limbs);
         FixedWidthBigUint { data: digits_from_biguint(self.to_biguint() + rhs.to_biguint(), n), n_limbs: n }
     }
 }
@@ -516,7 +516,7 @@ impl Add<&FixedWidthBigUint> for FixedWidthBigUint {
 impl Mul<&FixedWidthBigUint> for FixedWidthBigUint {
     type Output = FixedWidthBigUint;
     fn mul(self, rhs: &FixedWidthBigUint) -> FixedWidthBigUint {
-        let n = self.n_limbs;
+        let n = self.n_limbs.max(rhs.n_limbs);
         FixedWidthBigUint { data: digits_from_biguint(self.to_biguint() * rhs.to_biguint(), n), n_limbs: n }
     }
 }
@@ -526,7 +526,7 @@ impl Mul<&FixedWidthBigUint> for FixedWidthBigUint {
 impl WrappingAdd for FixedWidthBigUint {
     type Output = Self;
     fn wrapping_add(self, rhs: Self) -> Self {
-        let n = self.n_limbs;
+        let n = self.n_limbs.max(rhs.n_limbs);
         let width = n * DIGIT_BITS as usize;
         let sum = self.to_biguint() + rhs.to_biguint();
         let result = if sum.bits() > width as u64 {
@@ -541,7 +541,7 @@ impl WrappingAdd for FixedWidthBigUint {
 impl WrappingSub for FixedWidthBigUint {
     type Output = Self;
     fn wrapping_sub(self, rhs: Self) -> Self {
-        let n = self.n_limbs;
+        let n = self.n_limbs.max(rhs.n_limbs);
         let lhs = self.to_biguint();
         let rhs_b = rhs.to_biguint();
         let result = if lhs >= rhs_b {
@@ -556,7 +556,7 @@ impl WrappingSub for FixedWidthBigUint {
 impl WrappingMul for FixedWidthBigUint {
     type Output = Self;
     fn wrapping_mul(self, rhs: Self) -> Self {
-        let n = self.n_limbs;
+        let n = self.n_limbs.max(rhs.n_limbs);
         let product = self.to_biguint() * rhs.to_biguint();
         let result = product & low_mask(n);
         Self { data: digits_from_biguint(result, n), n_limbs: n }
@@ -582,7 +582,7 @@ impl WrappingSub for &FixedWidthBigUint {
 impl OverflowingAdd for FixedWidthBigUint {
     type Output = Self;
     fn overflowing_add(self, rhs: Self) -> (Self, bool) {
-        let n = self.n_limbs;
+        let n = self.n_limbs.max(rhs.n_limbs);
         let width = n * DIGIT_BITS as usize;
         let sum = self.to_biguint() + rhs.to_biguint();
         let overflow = sum.bits() > width as u64;
@@ -594,7 +594,7 @@ impl OverflowingAdd for FixedWidthBigUint {
 impl OverflowingSub for FixedWidthBigUint {
     type Output = Self;
     fn overflowing_sub(self, rhs: Self) -> (Self, bool) {
-        let n = self.n_limbs;
+        let n = self.n_limbs.max(rhs.n_limbs);
         let lhs = self.to_biguint();
         let rhs_b = rhs.to_biguint();
         if lhs >= rhs_b {
@@ -612,7 +612,7 @@ impl OverflowingSub for FixedWidthBigUint {
 impl CheckedAdd for FixedWidthBigUint {
     type Output = Self;
     fn checked_add(self, rhs: Self) -> Option<Self> {
-        let n = self.n_limbs;
+        let n = self.n_limbs.max(rhs.n_limbs);
         let result = self.to_biguint() + rhs.to_biguint();
         Some(Self { data: digits_from_biguint(result, n), n_limbs: n })
     }
@@ -621,7 +621,7 @@ impl CheckedAdd for FixedWidthBigUint {
 impl CheckedMul for FixedWidthBigUint {
     type Output = Self;
     fn checked_mul(self, rhs: Self) -> Option<Self> {
-        let n = self.n_limbs;
+        let n = self.n_limbs.max(rhs.n_limbs);
         let result = self.to_biguint() * rhs.to_biguint();
         Some(Self { data: digits_from_biguint(result, n), n_limbs: n })
     }
@@ -632,7 +632,7 @@ impl CheckedMul for FixedWidthBigUint {
 impl BorrowingSub for FixedWidthBigUint {
     type Output = Self;
     fn borrowing_sub(self, rhs: Self, borrow: bool) -> (Self, bool) {
-        let n = self.n_limbs;
+        let n = self.n_limbs.max(rhs.n_limbs);
         let lhs = BigInt::from(self.to_biguint());
         let rhs_int = BigInt::from(rhs.to_biguint()) + BigInt::from(borrow as u32);
         let diff = lhs - rhs_int;
@@ -655,7 +655,7 @@ impl CarryingMul for FixedWidthBigUint {
     type Output = Self;
 
     fn carrying_mul(self, rhs: Self, carry: Self) -> (Self, Self) {
-        let n = self.n_limbs;
+        let n = self.n_limbs.max(rhs.n_limbs);
         let width = n * DIGIT_BITS as usize;
         let product = self.to_biguint() * rhs.to_biguint() + carry.to_biguint();
         let mask = low_mask(n);
@@ -668,7 +668,7 @@ impl CarryingMul for FixedWidthBigUint {
     }
 
     fn carrying_mul_add(self, rhs: Self, carry: Self, add: Self) -> (Self, Self) {
-        let n = self.n_limbs;
+        let n = self.n_limbs.max(rhs.n_limbs);
         let width = n * DIGIT_BITS as usize;
         let product =
             self.to_biguint() * rhs.to_biguint() + carry.to_biguint() + add.to_biguint();

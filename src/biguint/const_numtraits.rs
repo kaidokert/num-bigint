@@ -471,6 +471,47 @@ impl BitAnd for &FixedWidthBigUint {
     }
 }
 
+// ── By-reference operator matrix (constrained/strict flavour requirements) ────
+// modmath's constrained/strict where-clauses require for<'a> &'a T: Op<&'a T>
+// and T: Op<&T>. The owned-only impls above cover Op<Self> for Self; these
+// cover the reference variants the flavours actually bind.
+
+impl Parity for &FixedWidthBigUint {
+    fn is_odd(self) -> bool {
+        self.data.first().map_or(false, |d| d & 1 == 1)
+    }
+    fn is_even(self) -> bool {
+        !Parity::is_odd(self)
+    }
+}
+
+// &T - &T
+impl Sub<&FixedWidthBigUint> for &FixedWidthBigUint {
+    type Output = FixedWidthBigUint;
+    fn sub(self, rhs: &FixedWidthBigUint) -> FixedWidthBigUint {
+        let n = self.n_limbs;
+        FixedWidthBigUint { data: digits_from_biguint(self.to_biguint() - rhs.to_biguint(), n), n_limbs: n }
+    }
+}
+
+// T + &T
+impl Add<&FixedWidthBigUint> for FixedWidthBigUint {
+    type Output = FixedWidthBigUint;
+    fn add(self, rhs: &FixedWidthBigUint) -> FixedWidthBigUint {
+        let n = self.n_limbs;
+        FixedWidthBigUint { data: digits_from_biguint(self.to_biguint() + rhs.to_biguint(), n), n_limbs: n }
+    }
+}
+
+// T * &T
+impl Mul<&FixedWidthBigUint> for FixedWidthBigUint {
+    type Output = FixedWidthBigUint;
+    fn mul(self, rhs: &FixedWidthBigUint) -> FixedWidthBigUint {
+        let n = self.n_limbs;
+        FixedWidthBigUint { data: digits_from_biguint(self.to_biguint() * rhs.to_biguint(), n), n_limbs: n }
+    }
+}
+
 // ── Wrapping arithmetic ───────────────────────────────────────────────────────
 
 impl WrappingAdd for FixedWidthBigUint {

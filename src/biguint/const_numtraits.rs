@@ -494,6 +494,15 @@ impl Sub<&FixedWidthBigUint> for &FixedWidthBigUint {
     }
 }
 
+// T - &T
+impl Sub<&FixedWidthBigUint> for FixedWidthBigUint {
+    type Output = FixedWidthBigUint;
+    fn sub(self, rhs: &FixedWidthBigUint) -> FixedWidthBigUint {
+        let n = self.n_limbs;
+        FixedWidthBigUint { data: digits_from_biguint(self.to_biguint() - rhs.to_biguint(), n), n_limbs: n }
+    }
+}
+
 // T + &T
 impl Add<&FixedWidthBigUint> for FixedWidthBigUint {
     type Output = FixedWidthBigUint;

@@ -214,13 +214,7 @@ impl One for FixedWidthBigUint {
 // ── BitsPrecision / WithPrecision ─────────────────────────────────────────────
 
 impl BitsPrecision for FixedWidthBigUint {
-    fn bits_precision(self) -> u32 {
-        (self.n_limbs * DIGIT_BITS as usize) as u32
-    }
-}
-
-impl BitsPrecision for &FixedWidthBigUint {
-    fn bits_precision(self) -> u32 {
+    fn bits_precision(&self) -> u32 {
         (self.n_limbs * DIGIT_BITS as usize) as u32
     }
 }
@@ -252,7 +246,33 @@ impl WithPrecision for FixedWidthBigUint {
         }
         Self { data, n_limbs: n }
     }
-    // _of variants require Self: Copy — not available for heap types.
+
+    // Copy bound dropped in alpha.3 — now available for non-Copy heap carriers.
+    fn widen_to_precision_of(self, witness: &Self) -> Self {
+        // Fixed-width: can't grow a value; identity within the same n_limbs.
+        // If witness is wider, re-express self at that width (zero-extend).
+        let n = witness.n_limbs;
+        Self { data: digits_from_biguint(self.to_biguint(), n), n_limbs: n }
+    }
+
+    fn zero_with_precision_of(witness: &Self) -> Self
+    where
+        Self: Zero,
+    {
+        Self { data: vec![0; witness.n_limbs], n_limbs: witness.n_limbs }
+    }
+
+    fn one_with_precision_of(witness: &Self) -> Self
+    where
+        Self: One,
+    {
+        let n = witness.n_limbs;
+        let mut data = vec![0; n];
+        if n > 0 {
+            data[0] = 1;
+        }
+        Self { data, n_limbs: n }
+    }
 }
 
 // ── Parity ────────────────────────────────────────────────────────────────────

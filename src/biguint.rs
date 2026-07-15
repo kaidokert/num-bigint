@@ -1002,11 +1002,11 @@ impl num_traits::FromBytes for BigUint {
 impl num_traits::ToBytes for BigUint {
     type Bytes = Vec<u8>;
 
-    fn to_be_bytes(self) -> Self::Bytes {
+    fn to_be_bytes(&self) -> Self::Bytes {
         self.to_bytes_be()
     }
 
-    fn to_le_bytes(self) -> Self::Bytes {
+    fn to_le_bytes(&self) -> Self::Bytes {
         self.to_bytes_le()
     }
 }

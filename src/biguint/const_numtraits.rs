@@ -170,6 +170,24 @@ impl Default for FixedWidthBigUint {
     }
 }
 
+// ── From<uN> — minimal-width policy ──────────────────────────────────────────
+// Constructs with the minimum number of limbs needed to hold the value.
+// Modmath widens operands to the modulus width via zero_with_precision_of/
+// widen_to_precision_of before arithmetic, so the starting width doesn't matter.
+
+macro_rules! impl_from_uint {
+    ($($t:ty),*) => {$(
+        impl From<$t> for FixedWidthBigUint {
+            fn from(v: $t) -> Self {
+                let bu = BigUint::from(v);
+                let n = (bu.data.len()).max(1);
+                Self::new(bu, n)
+            }
+        }
+    )*};
+}
+impl_from_uint!(u8, u16, u32, u64, u128, usize);
+
 // ── Personality ───────────────────────────────────────────────────────────────
 
 impl HasPersonality for FixedWidthBigUint {

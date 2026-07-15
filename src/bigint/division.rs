@@ -437,50 +437,39 @@ impl Rem<BigInt> for i128 {
     }
 }
 
-// const-num-traits: by-value receivers throughout.
+// num_traits::CheckedDiv / CheckedEuclid / Euclid — &self signatures, unmodified.
 impl CheckedDiv for BigInt {
     #[inline]
-    fn checked_div(self, v: BigInt) -> Option<BigInt> {
+    fn checked_div(&self, v: &BigInt) -> Option<BigInt> {
         if v.is_zero() {
             return None;
         }
-        Some(self.div(v))
+        Some(self / v)
     }
 }
 
 impl CheckedEuclid for BigInt {
     #[inline]
-    fn checked_div_euclid(self, v: BigInt) -> Option<BigInt> {
+    fn checked_div_euclid(&self, v: &BigInt) -> Option<BigInt> {
         if v.is_zero() {
             return None;
         }
-        Some(self.div_euclid(v))
+        Some(Euclid::div_euclid(self, v))
     }
 
     #[inline]
-    fn checked_rem_euclid(self, v: BigInt) -> Option<BigInt> {
+    fn checked_rem_euclid(&self, v: &BigInt) -> Option<BigInt> {
         if v.is_zero() {
             return None;
         }
-        Some(self.rem_euclid(v))
-    }
-
-    // const-num-traits strips the `checked_div_rem_euclid` default (its body
-    // used `?`); implementors supply it.
-    #[inline]
-    fn checked_div_rem_euclid(self, v: BigInt) -> Option<(BigInt, BigInt)> {
-        if v.is_zero() {
-            return None;
-        }
-        Some((self.clone().div_euclid(v.clone()), self.rem_euclid(v)))
+        Some(Euclid::rem_euclid(self, v))
     }
 }
 
 impl Euclid for BigInt {
     #[inline]
-    fn div_euclid(self, v: BigInt) -> BigInt {
-        let (q, r) = self.div_rem(&v);
-        // `.sign()` borrows, sidestepping the by-value `Signed` predicates.
+    fn div_euclid(&self, v: &BigInt) -> BigInt {
+        let (q, r) = self.div_rem(v);
         if r.sign() == super::Sign::Minus {
             if v.sign() == super::Sign::Plus {
                 q - 1
@@ -493,22 +482,16 @@ impl Euclid for BigInt {
     }
 
     #[inline]
-    fn rem_euclid(self, v: BigInt) -> BigInt {
-        let r = self % &v;
+    fn rem_euclid(&self, v: &BigInt) -> BigInt {
+        let r = self % v;
         if r.sign() == super::Sign::Minus {
             if v.sign() == super::Sign::Plus {
-                r + v
+                r + v.clone()
             } else {
-                r - v
+                r - v.clone()
             }
         } else {
             r
         }
-    }
-
-    // const-num-traits strips the `div_rem_euclid` default.
-    #[inline]
-    fn div_rem_euclid(self, v: BigInt) -> (BigInt, BigInt) {
-        (self.clone().div_euclid(v.clone()), self.rem_euclid(v))
     }
 }

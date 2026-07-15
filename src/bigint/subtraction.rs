@@ -294,7 +294,7 @@ impl Sub<BigInt> for i128 {
 
 impl CheckedSub for BigInt {
     #[inline]
-    fn checked_sub(self, v: BigInt) -> Option<BigInt> {
-        Some(self.sub(v))
+    fn checked_sub(&self, v: &BigInt) -> Option<BigInt> {
+        Some(self - v)
     }
 }

@@ -209,8 +209,8 @@ impl MulAssign<i128> for BigInt {
 
 impl CheckedMul for BigInt {
     #[inline]
-    fn checked_mul(self, v: BigInt) -> Option<BigInt> {
-        Some(self.mul(v))
+    fn checked_mul(&self, v: &BigInt) -> Option<BigInt> {
+        Some(self * v)
     }
 }
 

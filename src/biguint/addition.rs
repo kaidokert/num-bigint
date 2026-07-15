@@ -246,8 +246,8 @@ impl AddAssign<u128> for BigUint {
 
 impl CheckedAdd for BigUint {
     #[inline]
-    fn checked_add(self, v: BigUint) -> Option<BigUint> {
-        Some(self.add(v))
+    fn checked_add(&self, v: &BigUint) -> Option<BigUint> {
+        Some(self + v)
     }
 }
 

@@ -302,11 +302,11 @@ impl Sub<BigUint> for u128 {
 
 impl CheckedSub for BigUint {
     #[inline]
-    fn checked_sub(self, v: BigUint) -> Option<BigUint> {
+    fn checked_sub(&self, v: &BigUint) -> Option<BigUint> {
         match self.cmp(&v) {
             Less => None,
             Equal => Some(Zero::zero()),
-            Greater => Some(self.sub(v)),
+            Greater => Some(self - v),
         }
     }
 }

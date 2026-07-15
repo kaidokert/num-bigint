@@ -12,7 +12,8 @@ use core::{i128, u128};
 use core::{i64, u64};
 
 use num_integer::{Integer, Roots};
-use num_traits::{Num, One, Pow, Signed, Signum, Zero};
+use num_traits::{Num, One, Pow, Signed, Zero};
+use const_num_traits::Signum as CntSigum;
 
 use self::Sign::{Minus, NoSign, Plus};
 
@@ -250,8 +251,8 @@ impl One for BigInt {
     }
 }
 
-// const-num-traits moved `signum` out of `Signed` into its own `Signum` atom.
-impl Signum for BigInt {
+// const-num-traits Signum atom (by-value, separate from num_traits::Signed).
+impl CntSigum for BigInt {
     type Output = BigInt;
 
     #[inline]
@@ -264,32 +265,41 @@ impl Signum for BigInt {
     }
 }
 
-// const-num-traits takes the receiver by value across `Signed`.
+// num_traits::Signed — kept at original &self signatures, unmodified.
 impl Signed for BigInt {
     #[inline]
-    fn abs(self) -> BigInt {
+    fn abs(&self) -> BigInt {
         match self.sign {
-            Plus | NoSign => self,
-            Minus => BigInt::from(self.data),
+            Plus | NoSign => self.clone(),
+            Minus => BigInt::from(self.data.clone()),
         }
     }
 
     #[inline]
-    fn abs_sub(self, other: BigInt) -> BigInt {
+    fn abs_sub(&self, other: &BigInt) -> BigInt {
         if self <= other {
             Zero::zero()
         } else {
-            self - other
+            self.clone() - other.clone()
         }
     }
 
     #[inline]
-    fn is_positive(self) -> bool {
+    fn signum(&self) -> BigInt {
+        match self.sign {
+            Plus => BigInt::one(),
+            Minus => -BigInt::one(),
+            NoSign => BigInt::zero(),
+        }
+    }
+
+    #[inline]
+    fn is_positive(&self) -> bool {
         self.sign == Plus
     }
 
     #[inline]
-    fn is_negative(self) -> bool {
+    fn is_negative(&self) -> bool {
         self.sign == Minus
     }
 }
@@ -1120,11 +1130,11 @@ impl num_traits::FromBytes for BigInt {
 impl num_traits::ToBytes for BigInt {
     type Bytes = Vec<u8>;
 
-    fn to_be_bytes(self) -> Self::Bytes {
+    fn to_be_bytes(&self) -> Self::Bytes {
         self.to_signed_bytes_be()
     }
 
-    fn to_le_bytes(self) -> Self::Bytes {
+    fn to_le_bytes(&self) -> Self::Bytes {
         self.to_signed_bytes_le()
     }
 }

@@ -231,8 +231,8 @@ impl AddAssign<i128> for BigInt {
 
 impl CheckedAdd for BigInt {
     #[inline]
-    fn checked_add(self, v: BigInt) -> Option<BigInt> {
-        Some(self.add(v))
+    fn checked_add(&self, v: &BigInt) -> Option<BigInt> {
+        Some(self + v)
     }
 }
 

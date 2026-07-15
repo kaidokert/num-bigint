@@ -541,8 +541,8 @@ impl MulAssign<u128> for BigUint {
 
 impl CheckedMul for BigUint {
     #[inline]
-    fn checked_mul(self, v: BigUint) -> Option<BigUint> {
-        Some(self.mul(v))
+    fn checked_mul(&self, v: &BigUint) -> Option<BigUint> {
+        Some(self * v)
     }
 }
 

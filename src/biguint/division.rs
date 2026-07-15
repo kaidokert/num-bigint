@@ -609,60 +609,43 @@ impl Rem<BigUint> for u128 {
     }
 }
 
-// const-num-traits: by-value receivers throughout.
+// num_traits::CheckedDiv / CheckedEuclid / Euclid — &self signatures, unmodified.
 impl CheckedDiv for BigUint {
     #[inline]
-    fn checked_div(self, v: BigUint) -> Option<BigUint> {
+    fn checked_div(&self, v: &BigUint) -> Option<BigUint> {
         if v.is_zero() {
             return None;
         }
-        Some(self.div(v))
+        Some(self / v)
     }
 }
 
 impl CheckedEuclid for BigUint {
     #[inline]
-    fn checked_div_euclid(self, v: BigUint) -> Option<BigUint> {
+    fn checked_div_euclid(&self, v: &BigUint) -> Option<BigUint> {
         if v.is_zero() {
             return None;
         }
-        Some(self.div_euclid(v))
+        Some(Euclid::div_euclid(self, v))
     }
 
     #[inline]
-    fn checked_rem_euclid(self, v: BigUint) -> Option<BigUint> {
+    fn checked_rem_euclid(&self, v: &BigUint) -> Option<BigUint> {
         if v.is_zero() {
             return None;
         }
-        Some(self.rem_euclid(v))
-    }
-
-    // const-num-traits strips the `checked_div_rem_euclid` default.
-    #[inline]
-    fn checked_div_rem_euclid(self, v: BigUint) -> Option<(BigUint, BigUint)> {
-        if v.is_zero() {
-            return None;
-        }
-        Some((self.clone().div_euclid(v.clone()), self.rem_euclid(v)))
+        Some(Euclid::rem_euclid(self, v))
     }
 }
 
 impl Euclid for BigUint {
     #[inline]
-    fn div_euclid(self, v: BigUint) -> BigUint {
-        // trivially same as regular division
+    fn div_euclid(&self, v: &BigUint) -> BigUint {
         self / v
     }
 
     #[inline]
-    fn rem_euclid(self, v: BigUint) -> BigUint {
-        // trivially same as regular remainder
+    fn rem_euclid(&self, v: &BigUint) -> BigUint {
         self % v
-    }
-
-    // const-num-traits strips the `div_rem_euclid` default.
-    #[inline]
-    fn div_rem_euclid(self, v: BigUint) -> (BigUint, BigUint) {
-        (self.clone().div_euclid(v.clone()), self.rem_euclid(v))
     }
 }

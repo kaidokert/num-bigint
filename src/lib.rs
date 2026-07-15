@@ -123,6 +123,14 @@ mod macros;
 mod bigint;
 mod biguint;
 
+/// The primitive digit type used internally by [`BigUint`] and [`BigInt`].
+///
+/// `u32` on 32-bit targets, `u64` on 64-bit targets.
+#[cfg(not(u64_digit))]
+pub type Digit = u32;
+#[cfg(u64_digit)]
+pub type Digit = u64;
+
 #[cfg(feature = "rand")]
 mod bigrand;
 
@@ -227,6 +235,7 @@ pub use crate::biguint::BigUint;
 pub use crate::biguint::ToBigUint;
 pub use crate::biguint::U32Digits;
 pub use crate::biguint::U64Digits;
+pub use crate::biguint::const_numtraits::FixedWidthBigUint;
 
 pub use crate::bigint::BigInt;
 pub use crate::bigint::Sign;

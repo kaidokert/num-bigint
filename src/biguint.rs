@@ -19,6 +19,7 @@ mod multiplication;
 mod subtraction;
 
 mod bits;
+pub mod const_numtraits;
 mod convert;
 mod iter;
 mod monty;
@@ -719,6 +720,28 @@ impl BigUint {
     #[inline]
     pub fn to_u32_digits(&self) -> Vec<u32> {
         self.iter_u32_digits().collect()
+    }
+
+    /// Returns a reference to the raw digit slice (little-endian, least significant first).
+    ///
+    /// The digit type is `u32` on 32-bit targets and `u64` on 64-bit targets.
+    /// Leading zeros may be absent (the vec is normalized). Use [`BigUint::ensure_len`]
+    /// to guarantee a minimum number of digits before reading by index.
+    #[inline]
+    pub fn digits(&self) -> &[BigDigit] {
+        &self.data
+    }
+
+    /// Ensures the backing digit slice has at least `n` entries, padding with zeros.
+    ///
+    /// Does not reallocate if capacity is already sufficient; only updates `len`.
+    /// Needed when a downstream algorithm requires a stable word count that
+    /// normalization might otherwise shrink.
+    #[inline]
+    pub fn ensure_len(&mut self, n: usize) {
+        if self.data.len() < n {
+            self.data.resize(n, 0);
+        }
     }
 
     /// Returns the `u64` digits representation of the [`BigUint`] ordered least significant digit

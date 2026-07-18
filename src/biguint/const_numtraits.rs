@@ -25,7 +25,7 @@ use const_num_traits::{
         byte_slice::ByteSliceError,
         carrying::CarryingMul,
         checked::{CheckedAdd, CheckedMul},
-        overflowing::{OverflowingAdd, OverflowingSub},
+        overflowing::{OverflowingAdd, OverflowingMul, OverflowingSub},
         wrapping::{WrappingAdd, WrappingMul, WrappingSub},
     },
     BorrowingSub, FromByteSlice, HasPersonality, Nct, One, Parity, ToBytes, Zero,
@@ -390,6 +390,22 @@ impl OverflowingSub for FixedWidthBigUint {
 }
 
 // ── Checked arithmetic ────────────────────────────────────────────────────────
+
+impl OverflowingMul for FixedWidthBigUint {
+    type Output = Self;
+    fn overflowing_mul(self, rhs: Self) -> (Self, bool) {
+        let n = self.n_limbs.max(rhs.n_limbs);
+        let width = n * DIGIT_BITS as usize;
+        let product = self.inner * rhs.inner;
+        let overflow = product.bits() > width as u64;
+        let inner = if overflow {
+            product & (Self::width_modulus(n) - BigUint::from(1u32))
+        } else {
+            product
+        };
+        (Self { inner, n_limbs: n }, overflow)
+    }
+}
 
 impl CheckedAdd for FixedWidthBigUint {
     type Output = Self;

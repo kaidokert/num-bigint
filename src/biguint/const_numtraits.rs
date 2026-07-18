@@ -363,16 +363,8 @@ impl WrappingSub for &FixedWidthBigUint {
 impl OverflowingAdd for FixedWidthBigUint {
     type Output = Self;
     fn overflowing_add(self, rhs: Self) -> (Self, bool) {
-        let n = self.n_limbs.max(rhs.n_limbs);
-        let sum = self.inner + rhs.inner;
-        let width = n * DIGIT_BITS as usize;
-        let overflow = sum.bits() > width as u64;
-        let inner = if overflow {
-            sum & (Self::width_modulus(n) - BigUint::from(1u32))
-        } else {
-            sum
-        };
-        (Self { inner, n_limbs: n }, overflow)
+        // Heap-backed: addition grows to fit, never truncates. Flag always false.
+        (self.wrapping_add(rhs), false)
     }
 }
 
@@ -394,16 +386,10 @@ impl OverflowingSub for FixedWidthBigUint {
 impl OverflowingMul for FixedWidthBigUint {
     type Output = Self;
     fn overflowing_mul(self, rhs: Self) -> (Self, bool) {
-        let n = self.n_limbs.max(rhs.n_limbs);
-        let width = n * DIGIT_BITS as usize;
-        let product = self.inner * rhs.inner;
-        let overflow = product.bits() > width as u64;
-        let inner = if overflow {
-            product & (Self::width_modulus(n) - BigUint::from(1u32))
-        } else {
-            product
-        };
-        (Self { inner, n_limbs: n }, overflow)
+        // FixedWidthBigUint is heap-backed: the product grows to fit, never
+        // truncates. Overflow never occurs; the flag is always false.
+        // Consistent with wrapping_mul and checked_mul on this carrier.
+        (self.wrapping_mul(rhs), false)
     }
 }
 
@@ -635,15 +621,18 @@ mod tests {
     }
 
     #[test]
-    fn overflowing_add_detects_overflow() {
+    fn overflowing_add_is_lenient() {
+        // Heap-backed: overflowing_add never truncates, flag is always false.
+        // The result grows to hold the full sum — consistent with wrapping_add.
         let max = FixedWidthBigUint {
             inner: (BigUint::from(1u32) << DIGIT_BITS as usize) - BigUint::from(1u32),
             n_limbs: 1,
         };
         let one = fw(1, 1);
         let (result, overflow) = max.overflowing_add(one);
-        assert!(overflow);
-        assert_eq!(result.word(0), 0);
+        assert!(!overflow);
+        // Full sum (2^DIGIT_BITS) is preserved, not truncated to 0.
+        assert!(result.inner > BigUint::from(0u32));
     }
 
     #[test]

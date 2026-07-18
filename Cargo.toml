@@ -68,8 +68,7 @@ optional = true
 default-features = false
 
 [dependencies.const-num-traits]
-git = "https://github.com/kaidokert/num-traits.git"
-tag = "v0.2.1-alpha.3"
+version = "0.2.1"
 default-features = false
 features = ["ct"]
 

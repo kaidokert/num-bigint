@@ -128,7 +128,7 @@ impl PartialOrd for FixedWidthBigUint {
 
 impl Default for FixedWidthBigUint {
     fn default() -> Self {
-        Self { inner: BigUint::from(0u32), n_limbs: 0 }
+        Self { inner: BigUint::from(0u32), n_limbs: 1 }
     }
 }
 
@@ -169,7 +169,7 @@ impl Zero for FixedWidthBigUint {
 
 impl One for FixedWidthBigUint {
     fn one() -> Self {
-        Self { inner: BigUint::from(1u32), n_limbs: 0 }
+        Self { inner: BigUint::from(1u32), n_limbs: 1 }
     }
     fn is_one(&self) -> bool {
         self.inner.data.as_slice() == &[1 as BigDigit]

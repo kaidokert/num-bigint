@@ -320,7 +320,17 @@ impl WrappingAdd for FixedWidthBigUint {
     type Output = Self;
     fn wrapping_add(self, rhs: Self) -> Self {
         let n = self.n_limbs.max(rhs.n_limbs);
-        Self { inner: self.inner + rhs.inner, n_limbs: n }
+        let sum = self.inner + rhs.inner;
+        let width = n * DIGIT_BITS as usize;
+        // Mask to declared width, consistent with wrapping_sub.
+        // EEA sums stay < modulus ≤ 2^width so this is a no-op on the inv path;
+        // it correctly removes the 2^width that wrapping_sub injects on underflow.
+        let inner = if sum.bits() > width as u64 {
+            sum & (Self::width_modulus(n) - BigUint::from(1u32))
+        } else {
+            sum
+        };
+        Self { inner, n_limbs: n }
     }
 }
 
@@ -621,18 +631,22 @@ mod tests {
     }
 
     #[test]
-    fn overflowing_add_is_lenient() {
-        // Heap-backed: overflowing_add never truncates, flag is always false.
-        // The result grows to hold the full sum — consistent with wrapping_add.
+    fn wrapping_add_masks_consistent_with_sub() {
+        // wrapping_add masks to declared width, same as wrapping_sub.
+        // This ensures diff.wrapping_add(m) corrects the 2^width that
+        // wrapping_sub(a, b) injects when a < b.
         let max = FixedWidthBigUint {
             inner: (BigUint::from(1u32) << DIGIT_BITS as usize) - BigUint::from(1u32),
             n_limbs: 1,
         };
         let one = fw(1, 1);
-        let (result, overflow) = max.overflowing_add(one);
-        assert!(!overflow);
-        // Full sum (2^DIGIT_BITS) is preserved, not truncated to 0.
-        assert!(result.inner > BigUint::from(0u32));
+        // MAX + 1 wraps to 0
+        let result = max.clone().wrapping_add(one.clone());
+        assert_eq!(result.word(0), 0);
+        // overflowing_add delegates to wrapping_add; flag always false on heap carrier
+        let (r2, flag) = max.overflowing_add(one);
+        assert!(!flag);
+        assert_eq!(r2.word(0), 0);
     }
 
     #[test]
